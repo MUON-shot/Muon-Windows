@@ -2,7 +2,7 @@
 
 <h1 align="center">Muon</h1>
 
-<p align="center">Быстрый фоторедактор RAW и JPEG для Windows: всё как в Lightroom плюс вкладка с экспериментальными эффектами.<br>
+<p align="center">Быстрый фоторедактор RAW и JPEG для Windows<br>
 Один exe-файл на 2,4 МБ, без установки. Вся обработка идёт на видеокарте.</p>
 
 <p align="center"><a href="#english">English below</a></p>
