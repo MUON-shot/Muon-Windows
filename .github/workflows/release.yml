@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: build.bat
+
+      - name: Self-test on the software renderer
+        # hosted runners have no GPU; Muon falls back to WARP. Not blocking in case the runner cannot create a window.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python tools/make_demo_image.py demo.png 7
+          $env:MUON_WARP = "1"
+          New-Item -ItemType Directory -Force selftest | Out-Null
+          $p = Start-Process bin\Release\Muon.exe -ArgumentList "--selftest", "$PWD\demo.png", "$PWD\selftest" -PassThru -Wait
+          Get-Content selftest\log.txt
+          if ($p.ExitCode -ne 0 -or (Select-String -Path selftest\log.txt -Pattern "FAIL" -Quiet)) { exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: tools/package.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Muon-win64
+          path: dist/*.zip*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          body_path: docs/release-notes-1.0.0.md

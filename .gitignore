@@ -1,0 +1,15 @@
+# build output
+/build/
+/bin/
+/dist/
+/Muon.exe
+*.pdb
+*.map
+
+# fetched by build.bat
+/third_party/
+
+# local data: your own presets, sample images, edit sidecars
+/presets/
+/samples/
+*.muon
