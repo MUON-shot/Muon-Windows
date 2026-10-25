@@ -50,6 +50,24 @@ void BuildCurveLut(const Curve& c, float* lut) {
     }
 }
 
+OpticObj MakeOptic(int kind) {
+    OpticObj o;
+    o.id = NewId();
+    o.kind = kind;
+    switch (kind) {
+    case OP_PRISM:  o.name = T("Призма", "Prism"); o.size = 0.09f; o.stretch = 3.5f; o.angle = -20; o.dispersion = 70; o.curvature = 70; break;
+    case OP_LENS:   o.name = T("Линза", "Lens"); o.size = 0.17f; o.stretch = 1; o.curvature = 60; o.dispersion = 30; break;
+    case OP_SPHERE: o.name = T("Стеклянный шар", "Glass sphere"); o.size = 0.16f; o.stretch = 1; o.ior = 1.5f; o.dispersion = 35; break;
+    case OP_GLASS:  o.name = T("Стекло", "Glass panel"); o.size = 0.2f; o.stretch = 1.4f; o.variant = 1; o.curvature = 40; o.dispersion = 20; break;
+    case OP_DROPS:  o.name = T("Капли", "Water drops"); o.size = 0.25f; o.stretch = 1.5f; o.ior = 1.33f; o.dispersion = 15; o.curvature = 50; break;
+    case OP_LIGHT:  o.name = T("Свет", "Light"); o.height = 40; break;
+    case OP_SPOT:   o.name = T("Прожектор", "Spotlight"); o.height = 55; o.dir = 60; o.cone = 30; break;
+    case OP_BEAM:   o.name = T("Луч", "Light beam"); o.height = 50; o.x = 0.12f; o.y = 0.5f; o.dir = 0; o.intensity = 160;
+                    o.color[0] = 1; o.color[1] = 1; o.color[2] = 1; o.ambient = 0; break;
+    }
+    return o;
+}
+
 Mask MakeMask(int shape, int range) {
     Mask m;
     m.id = NewId();
@@ -61,6 +79,7 @@ Mask MakeMask(int shape, int range) {
     m.name = names[shape];
     if (range == MR_LUMA) m.name = T("Диапазон яркости", "Luminance range");
     if (range == MR_COLOR) m.name = T("Цветовой диапазон", "Colour range");
+    if (range == MR_DEPTH) m.name = T("Диапазон глубины", "Depth range");
     return m;
 }
 
@@ -150,6 +169,27 @@ std::string SerializeParams(const Params& p, bool geo, bool masks, bool diffOnly
         o << "text " << Escape(e.text) << '\n';
         o << "}\n";
     }
+    o << "relief " << p.relief << "\nmicrorelief " << p.microRelief << "\nfog " << p.fogAmount << ' ' << p.fogStart << ' ' << p.fogColor[0] << ' ' << p.fogColor[1] << ' ' << p.fogColor[2] << '\n';
+    o << "dof " << p.dofAmount << ' ' << p.dofFocus << ' ' << p.dofRange << '\n';
+    if (masks) {
+        if (!p.depthDabs.empty()) {
+            o << "depthdabs " << p.depthDabs.size();
+            for (auto& d : p.depthDabs) o << ' ' << d.x << ' ' << d.y << ' ' << d.r << ' ' << d.feather << ' ' << d.flow << ' ' << d.erase;
+            o << '\n';
+        }
+        for (auto& b : p.optics) {
+            o << "optic {\n";
+            o << "name " << Escape(b.name) << '\n';
+            o << "kind " << b.kind << ' ' << (int)b.enabled << ' ' << b.variant << '\n';
+            o << "place " << b.x << ' ' << b.y << ' ' << b.size << ' ' << b.stretch << ' ' << b.angle << ' ' << b.height << '\n';
+            o << "glass " << b.ior << ' ' << b.dispersion << ' ' << b.curvature << ' ' << b.roughness << ' ' << b.reflection << ' ' << b.caustics << ' ' << b.bevel << ' ' << b.tintAmt << '\n';
+            WriteArr(o, "tint", b.tint, 3);
+            WriteArr(o, "lightcol", b.color, 3);
+            o << "gloss " << b.gloss << '\n';
+            o << "light " << b.intensity << ' ' << b.range << ' ' << b.softness << ' ' << b.ambient << ' ' << b.glow << ' ' << b.rays << ' ' << b.dir << ' ' << b.cone << ' ' << b.width << '\n';
+            o << "}\n";
+        }
+    }
     return o.str();
 }
 
@@ -167,7 +207,8 @@ bool DeserializeParams(const std::string& s, Params& p, bool geo, bool masks) {
         p.cropX0 = old.cropX0; p.cropY0 = old.cropY0; p.cropX1 = old.cropX1; p.cropY1 = old.cropY1; p.cropAspect = old.cropAspect;
         p.perspV = old.perspV; p.perspH = old.perspH; p.geoScale = old.geoScale; p.straighten = old.straighten;
     }
-    if (!masks) p.masks = keepMasks;
+    if (!masks) { p.masks = keepMasks; p.optics = old.optics; p.depthDabs = old.depthDabs; }
+    OpticObj* co = nullptr;
     Mask* cm = nullptr;
     Effect* ce = nullptr;
     while (std::getline(in, line)) {
@@ -175,7 +216,28 @@ bool DeserializeParams(const std::string& s, Params& p, bool geo, bool masks) {
         std::istringstream is(line);
         std::string k; is >> k;
         if (k.empty()) continue;
-        if (k == "}") { cm = nullptr; ce = nullptr; continue; }
+        if (k == "}") { cm = nullptr; ce = nullptr; co = nullptr; continue; }
+        if (k == "optic") { if (masks) { p.optics.push_back(OpticObj()); co = &p.optics.back(); co->id = NewId(); } cm = nullptr; ce = nullptr; continue; }
+        if (co) {
+            OpticObj& b = *co;
+            if (k == "name") b.name = Unescape(RestOfLine(is));
+            else if (k == "kind") { int en; is >> b.kind >> en >> b.variant; b.enabled = en; }
+            else if (k == "place") is >> b.x >> b.y >> b.size >> b.stretch >> b.angle >> b.height;
+            else if (k == "glass") is >> b.ior >> b.dispersion >> b.curvature >> b.roughness >> b.reflection >> b.caustics >> b.bevel >> b.tintAmt;
+            else if (k == "tint") ReadArr(is, b.tint, 3);
+            else if (k == "lightcol") ReadArr(is, b.color, 3);
+            else if (k == "gloss") is >> b.gloss;
+            else if (k == "light") is >> b.intensity >> b.range >> b.softness >> b.ambient >> b.glow >> b.rays >> b.dir >> b.cone >> b.width;
+            continue;
+        }
+        if (k == "relief") { is >> p.relief; continue; }
+        if (k == "microrelief") { is >> p.microRelief; continue; }
+        if (k == "fog") { is >> p.fogAmount >> p.fogStart; ReadArr(is, p.fogColor, 3); continue; }
+        if (k == "dof") { is >> p.dofAmount >> p.dofFocus >> p.dofRange; continue; }
+        if (k == "depthdabs") {
+            if (masks) { size_t n = 0; is >> n; p.depthDabs.resize(n); for (auto& d : p.depthDabs) is >> d.x >> d.y >> d.r >> d.feather >> d.flow >> d.erase; p.depthRev = NewRev(); }
+            continue;
+        }
         if (k == "mask") { if (masks) { p.masks.push_back(Mask()); cm = &p.masks.back(); cm->id = NewId(); cm->brushRev = NewRev(); } else cm = nullptr; ce = nullptr; continue; }
         if (k == "effect") { p.effects.push_back(Effect()); ce = &p.effects.back(); ce->id = NewId(); cm = nullptr; continue; }
         if (cm) {

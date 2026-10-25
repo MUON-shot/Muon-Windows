@@ -2,6 +2,7 @@
 #include "preset.h"
 #include "pipeline.h"
 #include "effects.h"
+#include "depth.h"
 #include "widgets.h"
 #include "i18n.h"
 #include "version.h"
@@ -131,6 +132,9 @@ static bool StorePreset(const Preset& p) {
 }
 
 static std::wstring s_lastPath;
+static bool DepthModule();
+static void OpticsHeader();
+static void OpticsList();
 static int s_forceAlt = 0;   // --uitest only
 
 // =====================================================================  app settings (language, export, view)
@@ -272,6 +276,15 @@ static void OnLoaded(std::shared_ptr<LoadedImage> img) {
     delete a.current;
     a.current = new LoadedImage();
     a.current->preview = img->preview; a.current->sw = img->sw; a.current->sh = img->sh; a.current->isRaw = img->isRaw;
+    a.current->depthSrc = img->depthSrc; a.current->dw = img->dw; a.current->dh = img->dh;
+    {
+        std::vector<float> dm; int dw = 0, dh = 0;
+        bool cached = DepthCacheLoad(img->path, dm, dw, dh);
+        if (cached) { g_pipe.setDepth(dm, dw, dh); a.depthInfo.clear(); a.depthFromCache = true; }
+        if (a.depthState != DEPTH_BUSY) a.depthState = cached ? DEPTH_READY : DEPTH_NONE;
+    }
+    a.selOptic = -1;
+    a.depthPaint = false;
     a.curPath = img->path;
     a.info = img->info;
     a.isRaw = img->isRaw;
@@ -280,6 +293,11 @@ static void OnLoaded(std::shared_ptr<LoadedImage> img) {
     bool hadSidecar = (ReadTextFile(SidecarPath(a.curPath), side) || ReadTextFile(FallbackSidecar(a.curPath), side)) && DeserializeParams(side, p, true, true);
     if (!hadSidecar) ApplyDefaultsForNew(p, a.isRaw);
     a.params = p;
+    if (a.batchActive && !g_pipe.hasDepth() && g_pipe.needsDepth(p) && DepthModule()) {
+        // batch export cannot wait for the background job
+        DepthResult r;
+        if (DepthEstimate(img->depthSrc, img->dw, img->dh, r.d, r.w, r.h, r.error)) { g_pipe.setDepth(r.d, r.w, r.h); DepthCacheSave(img->path, r.d, r.w, r.h); }
+    }
     a.history.clear(); a.histPos = -1;
     a.rev++;
     Commit();
@@ -1185,8 +1203,8 @@ static void PanelMasks() {
         }
         ImGui::Spacing();
         W::Caption(T("Уточнить по диапазону", "Refine by range"));
-        const char* rn[] = { T("Нет", "None"), T("Яркость", "Luminance"), T("Цвет", "Colour") };
-        if (W::Segmented("range", &m.range, rn, 3)) Changed();
+        const char* rn[] = { T("Нет", "None"), T("Яркость", "Luminance"), T("Цвет", "Colour"), T("Глубина", "Depth") };
+        if (W::Segmented("range", &m.range, rn, 4)) Changed();
         if (m.range == MR_LUMA) {
             float lo = m.lumLo * 100, hi = m.lumHi * 100, fe = m.lumFeather * 100;
             if (Sl(T("От", "From"), &lo, 0, 100, 50, nullptr, kGradLum, 2)) m.lumLo = lo / 100;
@@ -1203,6 +1221,15 @@ static void PanelMasks() {
             if (Sl(T("Мин. насыщенность", "Min. saturation"), &sm, 0, 100, 10)) m.satMin = sm / 100;
             if (W::Button(T("Взять цвет с фото", "Pick from photo"), ImVec2(-1, 0), W::BTN_DEFAULT, g_app.pick == PICK_MASK_COLOR))
                 g_app.pick = g_app.pick == PICK_MASK_COLOR ? PICK_NONE : PICK_MASK_COLOR;
+        } else if (m.range == MR_DEPTH) {
+            W::Caption(DepthModule() ? T("0 это дальний план, 100 ближний. Карта глубины строится сама.", "0 is the far background, 100 the nearest. The depth map is built automatically.")
+                                     : T("Модуль глубины не установлен: диапазон по глубине недоступен.", "The depth module is not installed: depth range is unavailable."));
+            float lo = m.lumLo * 100, hi = m.lumHi * 100, fe = m.lumFeather * 100;
+            if (Sl(T("От##d", "From##d"), &lo, 0, 100, 50, nullptr, kGradLum, 2)) m.lumLo = lo / 100;
+            if (Sl(T("До##d", "To##d"), &hi, 0, 100, 100, nullptr, kGradLum, 2)) m.lumHi = hi / 100;
+            if (Sl(T("Плавность##d", "Smoothness##d"), &fe, 0, 50, 15)) m.lumFeather = fe / 100;
+            if (W::Button(T("Взять глубину с фото", "Pick depth from photo"), ImVec2(-1, 0), W::BTN_DEFAULT, g_app.pick == PICK_MASK_DEPTH))
+                g_app.pick = g_app.pick == PICK_MASK_DEPTH ? PICK_NONE : PICK_MASK_DEPTH;
         }
     }
     bool open = W::Section(T("Коррекция внутри маски", "Adjustments in mask"), true, &reset);
@@ -1330,8 +1357,8 @@ static void EffectCard(Effect& e, int idx, int count, int& moveUp, int& moveDown
         if (W::Combo(T("Наложение", "Blend mode"), &e.blend, BlendNames())) Changed();
         ImGui::Spacing();
         W::Caption(T("Где применять", "Apply to"));
-        const char* tn[] = { T("Везде", "Everywhere"), T("Яркость", "Luminance"), T("Цвет", "Colour"), T("Маска", "Mask") };
-        if (W::Segmented("tgt", &e.target, tn, 4)) Changed();
+        const char* tn[] = { T("Везде", "All"), T("Яркость", "Luma"), T("Цвет", "Colour"), T("Маска", "Mask"), T("Глубина", "Depth") };
+        if (W::Segmented("tgt", &e.target, tn, 5)) Changed();
         if (e.target == TG_LUMA) {
             float lo = e.tLo * 100, hi = e.tHi * 100, fe = e.tFeather * 100;
             if (Sl(T("От", "From"), &lo, 0, 100, 0, nullptr, kGradLum, 2)) e.tLo = lo / 100;
@@ -1361,6 +1388,13 @@ static void EffectCard(Effect& e, int idx, int count, int& moveUp, int& moveDown
                     ImGui::EndCombo();
                 }
             }
+        } else if (e.target == TG_DEPTH) {
+            W::Caption(T("0 это дальний план, 100 ближний.", "0 is the far background, 100 the nearest."));
+            float lo = e.tLo * 100, hi = e.tHi * 100, fe = e.tFeather * 100;
+            if (Sl(T("От##fd", "From##fd"), &lo, 0, 100, 0, nullptr, kGradLum, 2)) e.tLo = lo / 100;
+            if (Sl(T("До##fd", "To##fd"), &hi, 0, 100, 35, nullptr, kGradLum, 2)) e.tHi = hi / 100;
+            if (Sl(T("Плавность##fd", "Smoothness##fd"), &fe, 0, 50, 10)) e.tFeather = fe / 100;
+            if (W::Button(T("Взять глубину с фото", "Pick depth from photo"), ImVec2(-1, 0), W::BTN_DEFAULT, g_app.pick == PICK_FX_DEPTH && g_app.selEffect == idx)) { g_app.pick = PICK_FX_DEPTH; g_app.selEffect = idx; }
         }
         if (e.target != TG_ALL) Tg(T("Инвертировать область", "Invert area"), &e.targetInvert);
         ImGui::Spacing();
@@ -1424,10 +1458,18 @@ static void AddEffectPopup() {
 
 // Header of the Experimental tab: stays in place while the effect list scrolls.
 static void ExperimentalHeader() {
+    App& a = g_app;
     Params& p = g_app.params;
-    ImGui::PushFont(g_app.fontBold);
-    ImGui::TextUnformatted(T("Эксперименты", "Experiments"));
-    ImGui::PopFont();
+    const char* subs[] = { T("Эффекты", "Effects"), T("Оптика и свет", "Optics & light") };
+    if (W::Segmented("expsub", &a.expSub, subs, 2, ImGui::GetFrameHeight() * 1.15f)) { a.pick = PICK_NONE; a.depthPaint = false; }
+    ImGui::Spacing();
+    if (a.expSub == EXP_OPTICS) {
+        W::Caption(T("Стекло, линзы и свет поверх фото. Карта глубины подсказывает, что ближе к камере, чтобы тени и преломление ложились по объёму.",
+                     "Glass, lenses and lights over the photo. The depth map tells what is close to the camera, so shadows and refraction follow the scene."));
+        ImGui::Spacing();
+        OpticsHeader();
+        return;
+    }
     W::Caption(T("Эффекты накладываются по порядку, сверху вниз, поверх основной обработки.", "Effects stack from top to bottom on top of the classic edit."));
     ImGui::Spacing();
     if (W::Button(T("+  Добавить эффект", "+  Add effect"), ImVec2(-1, ImGui::GetFrameHeight() * 1.3f), W::BTN_PRIMARY)) ImGui::OpenPopup("addfx");
@@ -1474,6 +1516,358 @@ static void ExperimentalList() {
     if (down >= 0 && down + 1 < (int)p.effects.size()) { std::swap(p.effects[down], p.effects[down + 1]); Changed(); }
     if (dup >= 0) { Effect c = p.effects[dup]; c.id = NewId(); p.effects.insert(p.effects.begin() + dup + 1, c); Changed(); }
     if (del >= 0) { p.effects.erase(p.effects.begin() + del); Changed(); }
+}
+
+// =====================================================================  optics and light
+static bool DepthModule() {
+    static int state = -1;
+    if (state < 0) state = DepthModuleAvailable() ? 1 : 0;
+    return state == 1;
+}
+
+static void StartDepthJob() {
+    App& a = g_app;
+    if (a.depthState == DEPTH_BUSY || !a.current || a.current->depthSrc.empty() || !DepthModule()) return;
+    auto job = std::make_shared<DepthResult>();
+    job->path = a.curPath;
+    std::vector<uint8_t> src = a.current->depthSrc;
+    int w = a.current->dw, h = a.current->dh;
+    a.depthState = DEPTH_BUSY;
+    a.depthJob = std::async(std::launch::async, [job, src, w, h]() {
+        job->ok = DepthEstimate(src, w, h, job->d, job->w, job->h, job->error, &job->device);
+        return job;
+    });
+}
+
+static void PollDepth() {
+    App& a = g_app;
+    if (a.depthState == DEPTH_BUSY && a.depthJob.valid() && a.depthJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto r = a.depthJob.get();
+        if (_wcsicmp(r->path.c_str(), a.curPath.c_str()) != 0) {
+            // another photo was opened meanwhile: its map comes from the cache or a new run
+            a.depthState = g_pipe.hasDepth() ? DEPTH_READY : DEPTH_NONE;
+        } else if (r->ok) {
+            g_pipe.setDepth(r->d, r->w, r->h);
+            DepthCacheSave(r->path, r->d, r->w, r->h);
+            a.depthState = DEPTH_READY;
+            a.depthInfo = r->device;
+            a.depthFromCache = false;
+            a.needRender = true;
+        } else {
+            a.depthState = DEPTH_FAILED;
+            a.depthInfo = r->error;
+            LogLine("depth: " + r->error);
+        }
+    }
+    // the map is built on its own as soon as something needs it
+    if (a.depthState == DEPTH_NONE && g_pipe.hasSource() && !a.loading && g_pipe.needsDepth(a.params) && DepthModule()) StartDepthJob();
+}
+
+static const char* OpticIcon(int k) {
+    static const char* icons[OP_COUNT] = { "◭", "◯", "●", "▭", "∴", "✺", "◬", "➝" };
+    return k >= 0 && k < OP_COUNT ? icons[k] : "?";
+}
+
+static void AddOptic(int kind) {
+    Params& p = g_app.params;
+    OpticObj o = MakeOptic(kind);
+    // new objects appear in the middle of the visible frame, or at its left edge for a beam
+    Geo g = g_pipe.geometry(p, false);
+    o.x = g.cx0 + g.cw * (kind == OP_BEAM ? 0.12f : 0.5f);
+    o.y = g.cy0 + g.ch * 0.5f;
+    o.size *= g.ch;
+    // and do not land exactly on top of each other
+    int n = 0;
+    for (auto& e : p.optics) if (e.kind == kind) n++;
+    if (kind != OP_BEAM) { o.x += 0.04f * (n % 5); o.y += 0.04f * (n % 5); }
+    else o.y += 0.08f * (n % 5);
+    p.optics.push_back(o);
+    g_app.selOptic = (int)p.optics.size() - 1;
+    g_app.depthPaint = false;
+    Changed();
+}
+
+static void AddOpticPopup() {
+    ImGui::SetNextWindowSize(ImVec2(540 * g_app.dpi, 0));
+    if (!ImGui::BeginPopup("addoptic")) return;
+    struct Item { int kind; const char* name; const char* desc; };
+    const Item glass[] = {
+        { OP_PRISM, T("Призма", "Prism"), T("Раскладывает свет и изображение в радугу", "Splits light and the image into a rainbow") },
+        { OP_LENS, T("Линза", "Lens"), T("Собирающая, рассеивающая или цилиндрическая", "Converging, diverging or cylindrical") },
+        { OP_SPHERE, T("Стеклянный шар", "Glass sphere"), T("Переворачивает вид, как настоящий шар", "Flips the view like a real crystal ball") },
+        { OP_GLASS, T("Стекло", "Glass panel"), T("Гладкое, рифлёное, волнистое или матовое", "Clear, fluted, hammered or frosted") },
+        { OP_DROPS, T("Капли", "Water drops"), T("Капли воды на стекле перед объективом", "Water drops on glass in front of the lens") },
+    };
+    const Item lights[] = {
+        { OP_LIGHT, T("Свет", "Light"), T("Точечный источник с тенями по карте глубины", "Point light with shadows from the depth map") },
+        { OP_SPOT, T("Прожектор", "Spotlight"), T("Направленный конус света", "A directed cone of light") },
+        { OP_BEAM, T("Луч", "Light beam"), T("Узкий луч; через призму даёт спектр", "A narrow beam; a prism turns it into a spectrum") },
+    };
+    float cw = HalfWidth();
+    auto list = [&](const Item* items, int n) {
+        for (int i = 0; i < n; i++) {
+            if (i % 2) ImGui::SameLine();
+            ImGui::PushID(items[i].kind);
+            std::string label = std::string(OpticIcon(items[i].kind)) + "  " + items[i].name;
+            if (W::Button(label.c_str(), ImVec2(cw, ImGui::GetFrameHeight() * 1.35f))) { AddOptic(items[i].kind); ImGui::CloseCurrentPopup(); }
+            W::Hint(items[i].desc);
+            ImGui::PopID();
+        }
+    };
+    W::Caption(T("Стекло", "Glass"));
+    list(glass, 5);
+    ImGui::Spacing();
+    W::Caption(T("Источники света", "Light sources"));
+    list(lights, 3);
+    ImGui::EndPopup();
+}
+
+// Pinned part of the "Optics & light" sub-tab.
+static void OpticsHeader() {
+    if (W::Button(T("+  Добавить стекло или свет", "+  Add glass or light"), ImVec2(-1, ImGui::GetFrameHeight() * 1.3f), W::BTN_PRIMARY)) ImGui::OpenPopup("addoptic");
+    AddOpticPopup();
+    ImGui::Spacing();
+    ImGui::Separator();
+}
+
+static void DepthCard() {
+    App& a = g_app;
+    Params& p = a.params;
+    bool reset = false;
+    if (!W::Section(T("Карта глубины", "Depth map"), true, &reset)) {
+        if (reset) { p.relief = 50; p.showDepth = false; p.depthDabs.clear(); p.depthRev = NewRev(); Changed(); }
+        return;
+    }
+    if (reset) { p.relief = 50; p.showDepth = false; p.depthDabs.clear(); p.depthRev = NewRev(); Changed(); }
+    if (!DepthModule()) {
+        W::Caption(T("Модуль глубины не установлен, поэтому сцена считается плоской: свет и стекло работают, но без учёта объёма. Положите папку depth рядом с Muon.exe.",
+                     "The depth module is not installed, so the scene is treated as flat: light and glass still work, but without volume. Put the depth folder next to Muon.exe."));
+        return;
+    }
+    const char* st = "";
+    std::string line;
+    switch (a.depthState) {
+    case DEPTH_NONE: st = T("Карта ещё не построена. Она создаётся сама, когда нужна.", "Not built yet. It is created automatically when needed."); break;
+    case DEPTH_BUSY: st = T("Строится карта глубины…", "Building the depth map…"); break;
+    case DEPTH_READY:
+        line = T("Готова", "Ready");
+        if (a.depthFromCache) line += std::string("  ·  ") + T("из кэша", "from cache");
+        else if (!a.depthInfo.empty()) line += "  ·  " + a.depthInfo;
+        st = line.c_str();
+        break;
+    case DEPTH_FAILED: line = std::string(T("Не получилось: ", "Failed: ")) + a.depthInfo; st = line.c_str(); break;
+    }
+    W::Caption(st);
+    float hw = HalfWidth();
+    ImGui::BeginDisabled(a.depthState == DEPTH_BUSY);
+    if (W::Button(a.depthState == DEPTH_READY ? T("Пересчитать", "Rebuild") : T("Построить", "Build"), ImVec2(hw, 0))) {
+        if (a.depthState != DEPTH_BUSY) { a.depthState = DEPTH_NONE; StartDepthJob(); }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (W::Button(T("Показать карту", "Show map"), ImVec2(-1, 0), W::BTN_DEFAULT, p.showDepth)) { p.showDepth = !p.showDepth; Changed(); }
+    W::Hint(T("Светлое ближе к камере, тёмное дальше", "Bright is close to the camera, dark is far away"));
+    Sl(T("Рельеф", "Relief"), &p.relief, 0, 100, 50);
+    W::Hint(T("Насколько объёмной считается сцена: длиннее тени, сильнее спад света с глубиной", "How deep the scene is treated: longer shadows, stronger light falloff with depth"));
+    Sl(T("Микрорельеф", "Micro relief"), &p.microRelief, 0, 100, 35);
+    W::Hint(T("Мелкие неровности для света берутся из самого снимка: светлое читается как выпуклое", "Fine surface detail for lighting is taken from the picture: lighter reads as raised"));
+    ImGui::Spacing();
+    if (W::Button(T("✎  Поправить кистью", "✎  Fix with a brush"), ImVec2(-1, 0), W::BTN_DEFAULT, a.depthPaint)) {
+        a.depthPaint = !a.depthPaint;
+        if (a.depthPaint && !p.showDepth) { p.showDepth = true; Changed(); }
+    }
+    if (a.depthPaint) {
+        float tw = ThirdWidth();
+        if (W::Button(T("Ближе", "Closer"), ImVec2(tw, 0), W::BTN_DEFAULT, !a.depthFar)) a.depthFar = false;
+        ImGui::SameLine();
+        if (W::Button(T("Дальше", "Farther"), ImVec2(tw, 0), W::BTN_DEFAULT, a.depthFar)) a.depthFar = true;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(p.depthDabs.empty());
+        if (W::Button(T("Сбросить", "Reset"), ImVec2(-1, 0), W::BTN_DANGER)) { p.depthDabs.clear(); p.depthRev = NewRev(); Changed(); }
+        ImGui::EndDisabled();
+        float sz = a.depthBrush * 100;
+        if (W::Slider(T("Размер кисти##d", "Brush size##d"), &sz, 0.5f, 40, 6, "%.1f")) a.depthBrush = sz / 100;
+        float s = a.depthStrength * 100;
+        if (W::Slider(T("Сила##d", "Strength##d"), &s, 5, 100, 25)) a.depthStrength = s / 100;
+        W::Caption(T("Alt меняет направление, Ctrl + колесо меняет размер", "Alt flips the direction, Ctrl + wheel changes the size"));
+    }
+}
+
+static void AtmosphereCard() {
+    App& a = g_app;
+    Params& p = a.params;
+    bool reset = false;
+    bool open = W::Section(T("Атмосфера", "Atmosphere"), true, &reset);
+    if (reset) { Params d; p.fogAmount = d.fogAmount; p.fogStart = d.fogStart; memcpy(p.fogColor, d.fogColor, sizeof(p.fogColor));
+                 p.dofAmount = d.dofAmount; p.dofFocus = d.dofFocus; p.dofRange = d.dofRange; Changed(); }
+    if (!open) return;
+    Sl(T("Туман", "Fog"), &p.fogAmount, 0, 100, 0);
+    if (p.fogAmount > 0) {
+        Sl(T("Начало тумана", "Fog start"), &p.fogStart, 0, 100, 40);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", T("Цвет тумана", "Fog colour"));
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
+        if (ImGui::ColorEdit3("##fog", p.fogColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) Changed();
+    }
+    ImGui::Spacing();
+    Sl(T("Размытие по глубине", "Depth blur"), &p.dofAmount, 0, 100, 0);
+    if (p.dofAmount > 0) {
+        Sl(T("Фокус", "Focus"), &p.dofFocus, 0, 100, 70, nullptr, kGradLum, 2);
+        Sl(T("Зона резкости", "In-focus zone"), &p.dofRange, 0, 100, 15);
+        if (W::Button(T("Указать фокус на фото", "Pick focus on the photo"), ImVec2(-1, 0), W::BTN_DEFAULT, a.pick == PICK_FOCUS))
+            a.pick = a.pick == PICK_FOCUS ? PICK_NONE : PICK_FOCUS;
+    }
+}
+
+static void OpticEditor(OpticObj& o) {
+    App& a = g_app;
+    ImGui::PushID((int)o.id + 200000);
+    bool reset = false;
+    bool open = W::Section(o.name.c_str(), true, &reset);
+    if (reset) {
+        OpticObj d = MakeOptic(o.kind);
+        d.id = o.id; d.name = o.name; d.x = o.x; d.y = o.y; d.enabled = o.enabled;
+        o = d;
+        Changed();
+    }
+    if (!open) { ImGui::PopID(); return; }
+    static char nameBuf[128];
+    strncpy(nameBuf, o.name.c_str(), sizeof(nameBuf) - 1); nameBuf[sizeof(nameBuf) - 1] = 0;
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf))) { o.name = nameBuf; Changed(); }
+    if (!OpticIsLight(o.kind)) {
+        if (o.kind == OP_LENS) {
+            const char* v[] = { T("Собирающая", "Convex"), T("Рассеивающая", "Concave"), T("Цилиндр", "Cylinder") };
+            if (W::Segmented("variant", &o.variant, v, 3)) Changed();
+        } else if (o.kind == OP_GLASS) {
+            const char* v[] = { T("Гладкое", "Clear"), T("Рифлёное", "Fluted"), T("Волнистое", "Hammered"), T("Матовое", "Frosted") };
+            if (W::Segmented("variant", &o.variant, v, 4)) Changed();
+        }
+        float sz = o.size * 100;
+        if (Sl(T("Размер", "Size"), &sz, 1, 80, MakeOptic(o.kind).size * 100, "%.0f")) o.size = sz / 100;
+        if (o.kind != OP_SPHERE) Sl(T("Вытянутость", "Stretch"), &o.stretch, 0.3f, 8, MakeOptic(o.kind).stretch, "%.2f");
+        if (o.kind != OP_SPHERE) Sl(T("Поворот", "Rotation"), &o.angle, -180, 180, 0, "%.0f°");
+        Sl(T("Высота над сценой", "Height above scene"), &o.height, 0, 100, 45);
+        W::Hint(T("Чем выше стекло, тем дальше от него падает тень и каустика, и тем меньше его закрывают близкие предметы",
+                  "The higher the glass, the farther its shadow and caustics fall, and the less it is hidden by close objects"));
+        ImGui::Spacing();
+        Sl(T("Преломление", "Refractive index"), &o.ior, 1.0f, 2.5f, MakeOptic(o.kind).ior, "%.2f");
+        float qw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4;
+        struct Ior { const char* n; float v; } iors[] = { { T("Вода", "Water"), 1.33f }, { T("Стекло", "Glass"), 1.52f },
+                                                          { T("Хрусталь", "Crystal"), 1.7f }, { T("Алмаз", "Diamond"), 2.42f } };
+        for (int i = 0; i < 4; i++) {
+            if (i) ImGui::SameLine();
+            if (W::Button(iors[i].n, ImVec2(qw, 0), W::BTN_DEFAULT, std::fabs(o.ior - iors[i].v) < 0.005f)) { o.ior = iors[i].v; Changed(); }
+        }
+        Sl(T("Дисперсия", "Dispersion"), &o.dispersion, 0, 100, MakeOptic(o.kind).dispersion);
+        W::Hint(T("Радужная кайма: разные цвета преломляются по-разному", "Rainbow fringes: each colour bends by a different amount"));
+        bool flat = o.kind == OP_SPHERE || (o.kind == OP_GLASS && (o.variant == 0 || o.variant == 3));
+        if (!flat) Sl(T("Кривизна", "Curvature"), &o.curvature, 0, 100, MakeOptic(o.kind).curvature);
+        Sl(T("Матовость", "Roughness"), &o.roughness, 0, 100, 0);
+        Sl(T("Отражения", "Reflections"), &o.reflection, 0, 100, 40);
+        if (o.kind != OP_DROPS) {
+            Sl(T("Каустика", "Caustics"), &o.caustics, 0, 100, 60);
+            W::Hint(T("Световые блики, которые стекло собирает от источников света. Нужен хотя бы один источник света.",
+                      "Light patterns the glass focuses from light sources. Needs at least one light source."));
+            Sl(T("Фаска", "Bevel"), &o.bevel, 0, 100, 35);
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", T("Цвет стекла", "Glass colour"));
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
+        if (ImGui::ColorEdit3("##tint", o.tint, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) Changed();
+        Sl(T("Сила цвета", "Colour amount"), &o.tintAmt, 0, 100, 0);
+    } else {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", T("Цвет света", "Light colour"));
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
+        if (ImGui::ColorEdit3("##lcol", o.color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) Changed();
+        static const float sw[5][3] = { { 1, 0.62f, 0.32f }, { 1, 0.86f, 0.68f }, { 1, 0.97f, 0.92f }, { 0.68f, 0.8f, 1 }, { 1, 0.3f, 0.75f } };
+        static const char* swn[5][2] = { { "Свеча", "Candle" }, { "Лампа", "Lamp" }, { "Дневной", "Daylight" }, { "Холодный", "Cool" }, { "Неон", "Neon" } };
+        for (int i = 0; i < 5; i++) {
+            ImGui::SameLine();
+            ImGui::PushID(i);
+            if (ImGui::ColorButton(T(swn[i][0], swn[i][1]), ImVec4(sw[i][0], sw[i][1], sw[i][2], 1), ImGuiColorEditFlags_NoBorder)) { memcpy(o.color, sw[i], sizeof(o.color)); Changed(); }
+            ImGui::PopID();
+        }
+        Sl(T("Яркость", "Intensity"), &o.intensity, 0, 400, MakeOptic(o.kind).intensity, "%.0f");
+        if (o.kind != OP_BEAM) {
+            Sl(T("Отступ от поверхности", "Distance from surface"), &o.height, 0, 100, MakeOptic(o.kind).height);
+            W::Hint(T("Источник висит перед тем, что под ним. Близко к поверхности: резкий спад и длинные тени, далеко: ровный свет",
+                      "The lamp hovers in front of whatever is under it. Close: sharp falloff and long shadows, far: even light"));
+            Sl(T("Дальность", "Range"), &o.range, 1, 100, 45);
+        }
+        if (o.kind != OP_LIGHT) Sl(T("Направление", "Direction"), &o.dir, -180, 180, MakeOptic(o.kind).dir, "%.0f°");
+        if (o.kind == OP_SPOT) Sl(T("Угол конуса", "Cone angle"), &o.cone, 3, 80, 30, "%.0f°");
+        if (o.kind == OP_BEAM) Sl(T("Толщина луча", "Beam width"), &o.width, 1, 100, 5);
+        if (o.kind != OP_BEAM) {
+            Sl(T("Мягкость теней", "Shadow softness"), &o.softness, 0, 100, 30);
+            Sl(T("Блеск", "Gloss"), &o.gloss, 0, 100, 30);
+            W::Hint(T("Блики на гладких и светлых поверхностях", "Highlights on smooth and light surfaces"));
+            Sl(T("Затемнить остальное", "Darken the rest"), &o.ambient, 0, 100, 15);
+            Sl(T("Свечение", "Glow"), &o.glow, 0, 100, 40);
+            Sl(T("Лучи в воздухе", "Light shafts"), &o.rays, 0, 100, 0);
+        }
+        if (o.kind == OP_BEAM) W::Caption(T("Направьте луч в призму, чтобы получить спектр.", "Aim the beam at a prism to get a spectrum."));
+    }
+    ImGui::PopID();
+}
+
+static void OpticsList() {
+    App& a = g_app;
+    Params& p = a.params;
+    ImGui::Spacing();
+    DepthCard();
+    AtmosphereCard();
+    ImGui::Spacing();
+    W::Caption(T("Объекты", "Objects"));
+    if (p.optics.empty()) {
+        W::Caption(T("Пока пусто. Попробуйте:\n• свет низко сбоку: тени лягут по рельефу\n• стеклянный шар на переднем плане\n• луч через призму, чтобы получить радугу\n• рифлёное стекло поверх портрета",
+                     "Nothing here yet. Try:\n• a low light from the side: shadows follow the relief\n• a glass sphere in the foreground\n• a beam through a prism for a rainbow\n• fluted glass over a portrait"));
+        return;
+    }
+    int del = -1, dup = -1, up = -1;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = 0; i < (int)p.optics.size(); i++) {
+        OpticObj& o = p.optics[i];
+        ImGui::PushID((int)o.id);
+        bool sel = a.selOptic == i;
+        ImVec2 r0 = ImGui::GetCursorScreenPos();
+        float rh = ImGui::GetFrameHeight() + 4;
+        float w = ImGui::GetContentRegionAvail().x;
+        if (sel) {
+            dl->AddRectFilled(r0, ImVec2(r0.x + w, r0.y + rh), IM_COL32(255, 255, 255, 18), 6);
+            dl->AddRectFilled(r0, ImVec2(r0.x + 3, r0.y + rh), W::kAccent, 2);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(r0.x + 6, r0.y + 2));
+        if (W::IconButton(o.enabled ? "◉" : "○", T("Включить или выключить", "Enable or disable"), W::BTN_GHOST)) { o.enabled = !o.enabled; Changed(); }
+        ImGui::SameLine();
+        float nameW = w - ImGui::GetFrameHeight() * 4 - 36;
+        std::string label = std::string(OpticIcon(o.kind)) + "  " + o.name;
+        ImGui::PushStyleColor(ImGuiCol_Text, o.enabled ? ImVec4(0.9f, 0.91f, 0.93f, 1) : ImVec4(0.5f, 0.52f, 0.56f, 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0, 0.5f));
+        if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowOverlap, ImVec2(nameW, ImGui::GetFrameHeight()))) { a.selOptic = i; a.depthPaint = false; }
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(i == 0);
+        if (W::IconButton("▲", T("Выше: обрабатывается раньше", "Up: processed earlier"))) up = i;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (W::IconButton("⧉", T("Дублировать", "Duplicate"))) dup = i;
+        ImGui::SameLine();
+        if (W::IconButton("✕", T("Удалить", "Delete"), W::BTN_DANGER)) del = i;
+        ImGui::SetCursorScreenPos(ImVec2(r0.x, r0.y + rh + 2));
+        ImGui::Dummy(ImVec2(0, 0));
+        ImGui::PopID();
+    }
+    if (up > 0) { std::swap(p.optics[up], p.optics[up - 1]); if (a.selOptic == up) a.selOptic--; else if (a.selOptic == up - 1) a.selOptic++; Changed(); }
+    if (dup >= 0) {
+        OpticObj c = p.optics[dup]; c.id = NewId(); c.x += 0.04f; c.y += 0.04f; c.name += T(" (копия)", " (copy)");
+        p.optics.insert(p.optics.begin() + dup + 1, c); a.selOptic = dup + 1; Changed();
+    }
+    if (del >= 0) { p.optics.erase(p.optics.begin() + del); a.selOptic = std::min(a.selOptic, (int)p.optics.size() - 1); Changed(); }
+    if (a.selOptic >= 0 && a.selOptic < (int)p.optics.size()) { ImGui::Spacing(); OpticEditor(p.optics[a.selOptic]); }
+    else W::Caption(T("Выберите объект в списке или кликните по нему на фото.", "Select an object in the list or click it on the photo."));
 }
 
 // =====================================================================  canvas
@@ -1692,6 +2086,26 @@ static void DoPick(const CanvasXf& X) {
         a.pick = PICK_NONE;
         return;
     }
+    if (a.pick == PICK_MASK_DEPTH || a.pick == PICK_FOCUS || a.pick == PICK_FX_DEPTH) {
+        float n;
+        if (g_pipe.sampleDepth(uv.x, uv.y, n)) {
+            if (a.pick == PICK_FOCUS) { a.params.dofFocus = n * 100; Changed(); }
+            else if (a.pick == PICK_FX_DEPTH) {
+                if (a.selEffect >= 0 && a.selEffect < (int)a.params.effects.size()) {
+                    Effect& e = a.params.effects[a.selEffect];
+                    e.target = TG_DEPTH; e.tLo = std::max(0.0f, n - 0.12f); e.tHi = std::min(1.0f, n + 0.12f);
+                    Changed();
+                }
+            }
+            else if (a.selMask >= 0 && a.selMask < (int)a.params.masks.size()) {
+                Mask& m = a.params.masks[a.selMask];
+                m.range = MR_DEPTH; m.lumLo = std::max(0.0f, n - 0.12f); m.lumHi = std::min(1.0f, n + 0.12f);
+                Changed();
+            }
+        }
+        a.pick = PICK_NONE;
+        return;
+    }
     if (!g_pipe.sampleDeveloped(uv.x, uv.y, rgb)) return;
     float h, s, v;
     ImGui::ColorConvertRGBtoHSV(rgb[0], rgb[1], rgb[2], h, s, v);
@@ -1709,6 +2123,181 @@ static void DoPick(const CanvasXf& X) {
         Changed();
     }
     a.pick = PICK_NONE;
+}
+
+// Outline, selection and handles of glass objects and lights on the canvas.
+static OpticObj s_opticStart;
+
+static void OpticExtent(const OpticObj& o, float& L, float& S, bool& round) {
+    S = o.size;
+    L = o.size * o.stretch;
+    round = false;
+    if (o.kind == OP_SPHERE) { L = o.size; round = true; }
+    if (o.kind == OP_LENS && o.variant < 2) { L = o.size * std::max(0.3f, o.stretch); round = true; }
+}
+
+static void DepthBrushInteract(const CanvasXf& X, ImDrawList* dl, bool hovered, bool& used) {
+    App& a = g_app;
+    Params& p = a.params;
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 mp = io.MousePos;
+    float asp = (float)X.geo.canvasW / X.geo.canvasH;
+    float rScr = a.depthBrush * X.imgSize.y / X.geo.ch;
+    bool farther = a.depthFar != io.KeyAlt;
+    dl->AddCircle(mp, rScr, farther ? IM_COL32(120, 160, 255, 230) : IM_COL32(255, 255, 255, 230), 48, 1.5f);
+    const char* tag = farther ? T("дальше", "farther") : T("ближе", "closer");
+    dl->AddText(ImVec2(mp.x + rScr * 0.72f + 4, mp.y + rScr * 0.72f), IM_COL32(255, 255, 255, 200), tag);
+    if (hovered && ImGui::IsMouseClicked(0) && !io.KeyCtrl) { a.painting = true; a.lastDabX = -1; }
+    if (a.painting && io.MouseDown[0]) {
+        ImVec2 c = X.scrToCnv(mp);
+        float spacing = a.depthBrush * 0.25f;
+        auto addDab = [&](float x, float y) { p.depthDabs.push_back(Dab{ x, y, a.depthBrush, 0.8f, a.depthStrength * 0.12f, farther ? 1.f : 0.f }); };
+        if (a.lastDabX < 0) { addDab(c.x, c.y); a.lastDabX = c.x; a.lastDabY = c.y; Changed(); }
+        else {
+            float dx = (c.x - a.lastDabX) * asp, dy = c.y - a.lastDabY;
+            float d = std::sqrt(dx * dx + dy * dy);
+            if (d >= spacing) {
+                int n = (int)(d / spacing);
+                for (int k = 1; k <= n; k++) {
+                    float t = k * spacing / d;
+                    addDab(a.lastDabX + (c.x - a.lastDabX) * t, a.lastDabY + (c.y - a.lastDabY) * t);
+                }
+                float t = n * spacing / d;
+                a.lastDabX += (c.x - a.lastDabX) * t; a.lastDabY += (c.y - a.lastDabY) * t;
+                Changed();
+            }
+        }
+        used = true;
+    }
+    if (!io.MouseDown[0]) a.painting = false;
+    if (hovered) { ImGui::SetMouseCursor(ImGuiMouseCursor_None); used = true; }
+}
+
+static bool OpticsInteract(const CanvasXf& X, ImDrawList* dl, bool hovered) {
+    App& a = g_app;
+    Params& p = a.params;
+    ImGuiIO& io = ImGui::GetIO();
+    bool used = false;
+    if (a.depthPaint) { DepthBrushInteract(X, dl, hovered, used); return used; }
+    ImVec2 mp = io.MousePos;
+    float asp = (float)X.geo.canvasW / X.geo.canvasH;
+    float hr = 11 * a.dpi;
+    const float PI_ = 3.14159265f;
+    auto local = [&](const OpticObj& o, float lx, float ly) {
+        float an = o.angle * PI_ / 180, c = std::cos(an), s = std::sin(an);
+        return X.cnvToScr(o.x + (c * lx - s * ly) / asp, o.y + (s * lx + c * ly));
+    };
+    auto toLocal = [&](const OpticObj& o, ImVec2 cnv, float& lx, float& ly) {
+        float qx = (cnv.x - o.x) * asp, qy = cnv.y - o.y;
+        float an = o.angle * PI_ / 180, c = std::cos(an), s = std::sin(an);
+        lx = c * qx + s * qy; ly = -s * qx + c * qy;
+    };
+    auto dirPoint = [&](const OpticObj& o) {
+        float an = o.dir * PI_ / 180;
+        return X.cnvToScr(o.x + std::cos(an) * 0.12f / asp, o.y + std::sin(an) * 0.12f);
+    };
+    auto inside = [&](const OpticObj& o) {
+        float lx, ly; toLocal(o, X.scrToCnv(mp), lx, ly);
+        if (OpticIsLight(o.kind)) return Dist2(mp, X.cnvToScr(o.x, o.y)) < hr * hr * 2.2f;
+        float L, S; bool round; OpticExtent(o, L, S, round);
+        if (round) return (lx / L) * (lx / L) + (ly / S) * (ly / S) <= 1;
+        return std::fabs(lx) <= L && std::fabs(ly) <= S;
+    };
+    auto outline = [&](const OpticObj& o, ImU32 col, float th) {
+        if (OpticIsLight(o.kind)) {
+            ImVec2 c = X.cnvToScr(o.x, o.y);
+            float r = 7 * a.dpi;
+            dl->AddCircle(c, r, col, 24, th);
+            for (int k = 0; k < 8; k++) {
+                float t = k * PI_ / 4;
+                dl->AddLine(ImVec2(c.x + std::cos(t) * r * 1.5f, c.y + std::sin(t) * r * 1.5f), ImVec2(c.x + std::cos(t) * r * 2.1f, c.y + std::sin(t) * r * 2.1f), col, th);
+            }
+            if (o.kind != OP_LIGHT) dl->AddLine(c, dirPoint(o), col, th);
+            return;
+        }
+        float L, S; bool round; OpticExtent(o, L, S, round);
+        const int N = 64;
+        ImVec2 pts[N];
+        int n = round ? N : 4;
+        for (int i = 0; i < n; i++) {
+            if (round) { float t = i * 6.2831853f / N; pts[i] = local(o, std::cos(t) * L, std::sin(t) * S); }
+            else { static const float cx[4] = { -1, 1, 1, -1 }, cy[4] = { -1, -1, 1, 1 }; pts[i] = local(o, cx[i] * L, cy[i] * S); }
+        }
+        dl->AddPolyline(pts, n, col, ImDrawFlags_Closed, th);
+    };
+
+    // handles of the selected object: 0 move, 1 length, 2 width, 3 rotation, 4 direction
+    OpticObj* sel = a.selOptic >= 0 && a.selOptic < (int)p.optics.size() ? &p.optics[a.selOptic] : nullptr;
+    ImVec2 hp[5]; bool has[5] = {};
+    if (sel) {
+        OpticObj& o = *sel;
+        hp[0] = X.cnvToScr(o.x, o.y); has[0] = true;
+        if (!OpticIsLight(o.kind)) {
+            float L, S; bool round; OpticExtent(o, L, S, round);
+            hp[1] = local(o, L, 0); has[1] = true;
+            if (o.kind != OP_SPHERE) {
+                hp[2] = local(o, 0, S); has[2] = true;
+                hp[3] = local(o, 0, -S - 0.05f); has[3] = true;
+            }
+        } else if (o.kind != OP_LIGHT) { hp[4] = dirPoint(o); has[4] = true; }
+    }
+    int hot = s_drag;
+    if (hot < 0 && sel && hovered) {
+        for (int k = 4; k >= 1; k--) if (has[k] && Dist2(mp, hp[k]) < hr * hr) { hot = k; break; }
+        if (hot < 0 && inside(*sel)) hot = 0;
+    }
+    // unselected objects: outline on hover so they can be found and picked
+    int hoverObj = -1;
+    if (hot < 0 && hovered) for (int i = (int)p.optics.size() - 1; i >= 0; i--) if (p.optics[i].enabled && inside(p.optics[i])) { hoverObj = i; break; }
+    for (int i = 0; i < (int)p.optics.size(); i++) {
+        const OpticObj& o = p.optics[i];
+        if (i == a.selOptic) continue;
+        if (OpticIsLight(o.kind)) outline(o, IM_COL32(255, 255, 255, i == hoverObj ? 200 : 90), 1.2f);
+        else if (i == hoverObj) outline(o, IM_COL32(255, 255, 255, 120), 1.0f);
+    }
+    if (sel) {
+        OpticObj& o = *sel;
+        outline(o, IM_COL32(255, 255, 255, 200), 1.5f);
+        if (has[3]) dl->AddLine(local(o, 0, -o.size), hp[3], IM_COL32(255, 255, 255, 120), 1.0f);
+        for (int k = 0; k < 5; k++) if (has[k]) HandleDot(dl, hp[k], hot == k, k == 0 ? 6.0f : 5.0f);
+    }
+
+    if (hovered && ImGui::IsMouseClicked(0)) {
+        if (hot >= 0) { s_drag = hot; s_dragStart = mp; s_opticStart = *sel; used = true; }
+        else if (hoverObj >= 0) {
+            a.selOptic = hoverObj; sel = &p.optics[hoverObj];
+            s_drag = 0; s_dragStart = mp; s_opticStart = *sel; used = true;
+        } else a.selOptic = -1;
+    }
+    if (s_drag >= 0 && sel && io.MouseDown[0]) {
+        OpticObj& o = *sel;
+        ImVec2 c0 = X.scrToCnv(s_dragStart), c1 = X.scrToCnv(mp);
+        float lx, ly; toLocal(o, c1, lx, ly);
+        float qx = (c1.x - o.x) * asp, qy = c1.y - o.y;
+        if (s_drag == 0) { o.x = s_opticStart.x + c1.x - c0.x; o.y = s_opticStart.y + c1.y - c0.y; }
+        else if (s_drag == 1) {
+            float L = std::fabs(lx);
+            if (o.kind == OP_SPHERE) o.size = std::clamp(L, 0.01f, 0.8f);
+            else o.stretch = std::clamp(L / std::max(o.size, 1e-3f), 0.3f, 8.0f);
+        }
+        else if (s_drag == 2) o.size = std::clamp(std::fabs(ly), 0.01f, 0.8f);
+        else if (s_drag == 3) {
+            float ang = std::atan2(qy, qx) * 180 / PI_ + 90;
+            if (io.KeyShift) ang = std::round(ang / 15) * 15;
+            while (ang > 180) ang -= 360;
+            while (ang < -180) ang += 360;
+            o.angle = ang;
+        }
+        else if (s_drag == 4) {
+            float ang = std::atan2(qy, qx) * 180 / PI_;
+            if (io.KeyShift) ang = std::round(ang / 15) * 15;
+            o.dir = ang;
+        }
+        Changed(); used = true;
+    }
+    if (!io.MouseDown[0]) s_drag = -1;
+    if (hovered && hot >= 0 && s_drag < 0) ImGui::SetMouseCursor(hot == 0 ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Hand);
+    return used || s_drag >= 0;
 }
 
 static int WorkTier(float needed, int fullLong) {
@@ -1778,10 +2367,15 @@ static void Canvas(ImVec2 pos, ImVec2 size) {
         consumed = true;
     } else if (a.tool == TOOL_MASK && a.bottomTab == TAB_CLASSIC && !spaceHeld) {
         consumed = MaskInteract(X, dl, hovered);
+    } else if (a.bottomTab == TAB_EXPERIMENTS && a.expSub == EXP_OPTICS && !spaceHeld) {
+        consumed = OpticsInteract(X, dl, hovered);
     }
 
     if (hovered && io.MouseWheel != 0 && !cropMode) {
-        if (io.KeyCtrl && a.tool == TOOL_MASK) {
+        bool depthBrush = a.depthPaint && a.bottomTab == TAB_EXPERIMENTS && a.expSub == EXP_OPTICS;
+        if (io.KeyCtrl && depthBrush) {
+            a.depthBrush = std::clamp(a.depthBrush * (io.MouseWheel > 0 ? 1.12f : 0.89f), 0.003f, 0.4f);
+        } else if (io.KeyCtrl && a.tool == TOOL_MASK) {
             a.brushSize = std::clamp(a.brushSize * (io.MouseWheel > 0 ? 1.12f : 0.89f), 0.003f, 0.4f);
         } else {
             float nz = std::clamp(z * std::pow(1.18f, io.MouseWheel), fitZ * 0.25f, 16.0f);
@@ -2061,7 +2655,8 @@ static void RightPanel(ImVec2 pos, ImVec2 size) {
     } else {
         ExperimentalHeader();
         ImGui::BeginChild("##scrollx", ImVec2(0, 0), 0, ImGuiWindowFlags_NoBackground);
-        ExperimentalList();
+        if (a.expSub == EXP_OPTICS) OpticsList();
+        else ExperimentalList();
         ImGui::Dummy(ImVec2(0, 30 * a.dpi));
         ImGui::EndChild();
     }
@@ -2261,7 +2856,10 @@ static void HelpWindow() {
             { "Enter / Esc", "Enter / Esc", "Применить кадр / отменить пипетку", "Apply crop / cancel picker" },
             { "O", "O", "Показать маску", "Show mask overlay" }, { "J", "J", "Пересветы и провалы", "Clipping warning" },
             { "[ ]", "[ ]", "Размер кисти", "Brush size" }, { "Alt + кисть", "Alt + brush", "Стирание", "Erase" },
-            { "Delete", "Delete", "Удалить выбранную маску", "Delete the selected mask" },
+            { "Delete", "Delete", "Удалить выбранную маску или объект", "Delete the selected mask or object" },
+            { "Shift + поворот", "Shift + rotate", "Поворот шагами по 15°", "Rotate in 15° steps" },
+            { "Ctrl + колесо", "Ctrl + wheel", "Размер кисти маски или глубины", "Mask or depth brush size" },
+            { "Alt + кисть глубины", "Alt + depth brush", "Ближе или дальше наоборот", "Flip closer / farther" },
             { "Tab", "Tab", "Показать / скрыть ленту", "Show / hide filmstrip" },
             { "Двойной клик", "Double-click", "Сбросить значение ползунка", "Reset a slider" },
             { "Ctrl + клик", "Ctrl + click", "Ввести число", "Type a value" },
@@ -2313,11 +2911,17 @@ static void Shortcuts() {
         if (ImGui::IsKeyPressed(ImGuiKey_M, false)) { a.tool = a.tool == TOOL_MASK ? TOOL_EDIT : TOOL_MASK; a.pick = PICK_NONE; }
         if (ImGui::IsKeyPressed(ImGuiKey_E, false)) a.tool = TOOL_EDIT;
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { if (a.pick) a.pick = PICK_NONE; else if (a.tool == TOOL_CROP) a.tool = TOOL_EDIT; }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { if (a.pick) a.pick = PICK_NONE; else if (a.depthPaint) a.depthPaint = false; else if (a.tool == TOOL_CROP) a.tool = TOOL_EDIT; }
     if ((ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) && a.tool == TOOL_CROP) a.tool = TOOL_EDIT;
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket)) a.brushSize = std::max(0.003f, a.brushSize * 0.88f);
-    if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) a.brushSize = std::min(0.4f, a.brushSize * 1.12f);
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && a.tool == TOOL_MASK && a.selMask >= 0 && a.selMask < (int)a.params.masks.size()) {
+    float& bs = a.depthPaint && a.bottomTab == TAB_EXPERIMENTS ? a.depthBrush : a.brushSize;
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket)) bs = std::max(0.003f, bs * 0.88f);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightBracket)) bs = std::min(0.4f, bs * 1.12f);
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && a.bottomTab == TAB_EXPERIMENTS && a.expSub == EXP_OPTICS && a.selOptic >= 0 && a.selOptic < (int)a.params.optics.size()) {
+        a.params.optics.erase(a.params.optics.begin() + a.selOptic);
+        a.selOptic = std::min(a.selOptic, (int)a.params.optics.size() - 1);
+        Changed();
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && a.bottomTab == TAB_CLASSIC && a.tool == TOOL_MASK && a.selMask >= 0 && a.selMask < (int)a.params.masks.size()) {
         a.params.masks.erase(a.params.masks.begin() + a.selMask);
         a.selMask = std::min(a.selMask, (int)a.params.masks.size() - 1);
         Changed();
@@ -2356,6 +2960,8 @@ void AppShutdown() {
     SaveSettings();
     CollectionSave();
     if (a.loader.valid()) a.loader.wait();
+    if (a.depthJob.valid()) a.depthJob.wait();
+    DepthShutdown();
     ThumbsStop();
     delete a.current; a.current = nullptr;
 }
@@ -2380,6 +2986,7 @@ void AppFrame() {
         else if (!a.loading && !g_pipe.hasSource() && !a.noPersist && !a.collection.empty()) { AppOpenFile(a.collection[0]); a.bottomTab = TAB_CLASSIC; }
     }
     PollLoader();
+    PollDepth();
     ThumbsPoll();
     Shortcuts();
     if (g_gpu.outOfMemory) {
@@ -2462,7 +3069,8 @@ void AppFrame() {
 // Puts the UI into a known state for layout screenshots (--uitest).
 void UiTestSetup(int scenario) {
     App& a = g_app;
-    if (scenario >= 10) { g_lang = 1; ApplyLanguage(); scenario -= 10; }
+    if (scenario >= 10 && scenario < 20) { g_lang = 1; ApplyLanguage(); scenario -= 10; }
+    if (scenario == 21) { g_lang = 1; ApplyLanguage(); scenario = 20; }
     switch (scenario) {
     case 1: a.tool = TOOL_CROP; break;
     case 2: a.tool = TOOL_MASK; AddMask(MS_RADIAL, MR_NONE); a.params.masks.back().adj.exposure = 0.8f; AddMask(MS_BRUSH, MR_NONE); a.selMask = 0; break;
@@ -2476,6 +3084,17 @@ void UiTestSetup(int scenario) {
     }
     case 4: a.exportOpen = true; a.exp.watermark = true; strcpy(a.exp.wmText, "© Muon"); break;
     case 5: a.showHelp = true; break;
+    case 20: {
+        a.bottomTab = TAB_EXPERIMENTS; a.expSub = EXP_OPTICS;
+        OpticObj l = MakeOptic(OP_LIGHT); l.x = 0.16f; l.y = 0.3f; l.height = 35; l.rays = 35; l.ambient = 35; a.params.optics.push_back(l);
+        OpticObj pr = MakeOptic(OP_PRISM); pr.x = 0.6f; pr.y = 0.4f; pr.angle = 90; pr.size = 0.06f; pr.stretch = 2.2f; a.params.optics.push_back(pr);
+        OpticObj bm = MakeOptic(OP_BEAM); bm.x = 0.3f; bm.y = 0.42f; bm.dir = 0; a.params.optics.push_back(bm);
+        OpticObj s = MakeOptic(OP_SPHERE); s.x = 0.3f; s.y = 0.7f; s.size = 0.14f; a.params.optics.push_back(s);
+        a.params.fogAmount = 20;
+        a.selOptic = 3;
+        Changed();
+        break;
+    }
     case 8: a.params.exposure = 1.3f; s_forceAlt = ALT_HIGHLIGHTS; Changed(); break;
     case 9: a.params.exposure = -1.5f; s_forceAlt = ALT_SHADOWS; Changed(); break;
     case 6: {

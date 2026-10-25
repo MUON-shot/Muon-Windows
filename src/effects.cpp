@@ -828,8 +828,11 @@ float4 main(VSO i) : SV_Target {
         float d = abs(frac(h.x - hueC / 360 + 0.5) - 0.5) * 360;
         w = 1 - smoothstep(hueW * 0.5, hueW * 0.5 + hueF + 1e-3, d);
         w *= smoothstep(satMin * 0.5, satMin + 1e-3, h.y);
-    } else if (target > 2.5) {
+    } else if (target > 2.5 && target < 3.5) {
         w = t2.SampleLevel(sLin, i.uv, 0).r;
+    } else if (target > 3.5) {
+        float N = t3.SampleLevel(sLin, i.uv, 0).r; float f = max(feather, 1e-3);
+        w = smoothstep(lo - f, lo, N) * (1 - smoothstep(hi, hi + f, N));
     }
     if (invert > 0.5) w = 1 - w;
     float3 r = saturate(blendMode(a, b, (int)blend));

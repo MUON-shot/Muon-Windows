@@ -173,6 +173,9 @@ bool Gpu::init(ID3D11Device* d, ID3D11DeviceContext* c) {
     bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     dev->CreateBlendState(&bl, &blendAlpha);
+    bl.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE; bl.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    dev->CreateBlendState(&bl, &blendAdd);
 
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
@@ -187,7 +190,7 @@ void Gpu::shutdown() {
     dummies.clear();
     SafeRelease(vsFull); SafeRelease(vsDab);
     for (auto& s : samp) SafeRelease(s);
-    SafeRelease(cbCommon); SafeRelease(cbPass); SafeRelease(blendAlpha); SafeRelease(raster);
+    SafeRelease(cbCommon); SafeRelease(cbPass); SafeRelease(blendAlpha); SafeRelease(blendAdd); SafeRelease(raster);
 }
 
 Tex* Gpu::create(int w, int h, DXGI_FORMAT fmt, bool rt, const void* data, int pitch, bool mips) {

@@ -26,7 +26,7 @@ target_compile_options(imgui PRIVATE /O2 /MP)
 # ---------------- Muon ----------------
 add_executable(Muon WIN32
     src/main.cpp src/gpu.cpp src/pipeline.cpp src/params.cpp src/imageio.cpp
-    src/ui.cpp src/library.cpp src/preset.cpp src/widgets.cpp src/effects.cpp src/selftest.cpp src/muon.manifest res/muon.rc)
+    src/ui.cpp src/library.cpp src/preset.cpp src/widgets.cpp src/effects.cpp src/selftest.cpp src/depth.cpp src/pipeline_optics.cpp src/muon.manifest res/muon.rc)
 target_link_libraries(Muon PRIVATE libraw imgui d3d11 dxgi d3dcompiler windowscodecs ole32 shell32 shlwapi dwmapi gdi32 uuid ws2_32 dbghelp)
 target_compile_definitions(Muon PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(Muon PRIVATE /utf-8 /O2 /MP /W3 /EHsc /wd4244 /wd4305 /wd4267)

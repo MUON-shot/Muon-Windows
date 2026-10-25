@@ -77,7 +77,7 @@ struct Curve {
 struct Wheel { float hue = 0, sat = 0, lum = 0; };
 
 enum MaskShape { MS_FULL = 0, MS_LINEAR, MS_RADIAL, MS_BRUSH };
-enum MaskRange { MR_NONE = 0, MR_LUMA, MR_COLOR };
+enum MaskRange { MR_NONE = 0, MR_LUMA, MR_COLOR, MR_DEPTH };   // MR_DEPTH reuses lumLo/lumHi/lumFeather as nearness
 
 struct Dab { float x, y, r, feather, flow; float erase; };
 
@@ -115,7 +115,7 @@ enum EffectType {
     FX_KALEIDO, FX_TILTSHIFT, FX_WAVE, FX_HUESHIFT, FX_XEROX, FX_COUNT
 };
 
-enum TargetKind { TG_ALL = 0, TG_LUMA, TG_COLOR, TG_MASK };
+enum TargetKind { TG_ALL = 0, TG_LUMA, TG_COLOR, TG_MASK, TG_DEPTH };   // TG_DEPTH reuses tLo/tHi/tFeather as nearness
 
 struct Effect {
     uint32_t id = 0;
@@ -136,6 +136,32 @@ struct Effect {
     int tMask = 0;
 };
 
+// Glass objects and light sources placed on the photo ("Optics & light").
+enum OpticKind { OP_PRISM = 0, OP_LENS, OP_SPHERE, OP_GLASS, OP_DROPS, OP_LIGHT, OP_SPOT, OP_BEAM, OP_COUNT };
+inline bool OpticIsLight(int k) { return k >= OP_LIGHT; }
+
+struct OpticObj {
+    uint32_t id = 0;
+    int kind = OP_PRISM;
+    bool enabled = true;
+    std::string name;
+    float x = 0.5f, y = 0.5f;      // centre, canvas-normalized
+    float size = 0.16f;            // radius / half width in canvas heights
+    float stretch = 2.5f;          // length to width (prism, glass plate, cylindrical lens)
+    float angle = 0;               // degrees
+    float height = 45;             // glass: height above the far plane; light: height of the source (0..100)
+    // glass
+    int variant = 0;               // lens: convex, concave, cylinder; glass: clear, ribbed, hammered, frosted
+    float ior = 1.52f, dispersion = 45, curvature = 55, roughness = 0, reflection = 40, caustics = 60, bevel = 35;
+    float tint[3] = { 0.86f, 0.95f, 1.0f };
+    float tintAmt = 0;
+    // light
+    float color[3] = { 1.0f, 0.86f, 0.68f };
+    float intensity = 120, range = 45, softness = 30, ambient = 15, glow = 40, rays = 0;
+    float dir = 0, cone = 35, width = 5;   // spot / beam direction (degrees), spot cone, beam width
+    float gloss = 30;                      // shininess of the surfaces this light reveals
+};
+
 struct Params {
 #define DECL(n, l, mi, ma, d) float n = d;
     ALL_SCALAR_PARAMS(DECL)
@@ -153,7 +179,19 @@ struct Params {
     int cropAspect = 0;
     std::vector<Mask> masks;
     std::vector<Effect> effects;
+    // depth map, optics and light
+    std::vector<OpticObj> optics;
+    std::vector<Dab> depthDabs;    // hand corrections of the depth map (erase = push further away)
+    uint32_t depthRev = 0;
+    float relief = 50;             // how strongly the depth map shapes light and refraction
+    float microRelief = 35;        // fine surface relief taken from the picture for lighting
+    float fogAmount = 0, fogStart = 40;
+    float fogColor[3] = { 0.78f, 0.82f, 0.9f };
+    float dofAmount = 0, dofFocus = 70, dofRange = 15;
+    bool showDepth = false;
 };
+
+OpticObj MakeOptic(int kind);
 
 uint32_t NewId();
 uint32_t NewRev();

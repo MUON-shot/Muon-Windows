@@ -7,4 +7,6 @@ if not exist third_party\LibRaw git clone --depth 1 --branch 0.22.2 https://gith
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 || exit /b 1
 cmake --build build --config Release --target Muon -- /m || exit /b 1
 copy /y bin\Release\Muon.exe Muon.exe >nul
+rem Optional depth module for "Optics & light" (about 85 MB, downloaded once).
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\fetch_depth.ps1 || echo Depth module was not downloaded, Muon works without it.
 echo Готово: %~dp0Muon.exe

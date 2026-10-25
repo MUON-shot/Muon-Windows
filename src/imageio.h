@@ -11,6 +11,8 @@ struct LoadedImage {
     std::vector<uint8_t> rgba8;     // other formats: sRGB 8 bit
     std::vector<float> preview;       // linear RGB preview for auto tools
     int sw = 0, sh = 0;
+    std::vector<uint8_t> depthSrc;  // sRGB RGBA8, long side up to 770, input for the depth network
+    int dw = 0, dh = 0;
     std::string info;               // camera / exposure summary
     std::wstring path;
     std::string error;

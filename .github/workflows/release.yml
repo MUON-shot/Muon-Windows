@@ -19,6 +19,10 @@ jobs:
         shell: cmd
         run: build.bat
 
+      - name: Depth module
+        shell: pwsh
+        run: tools/fetch_depth.ps1
+
       - name: Self-test on the software renderer
         # hosted runners have no GPU; Muon falls back to WARP. Not blocking in case the runner cannot create a window.
         continue-on-error: true
@@ -47,4 +51,4 @@ jobs:
           files: |
             dist/*.zip
             dist/*.sha256
-          body_path: docs/release-notes-1.0.0.md
+          body_path: docs/release-notes-1.1.0.md

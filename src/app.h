@@ -54,11 +54,16 @@ struct ExportSettings {
     float wmOpacity = 70;
     bool wmDark = false;
 };
-enum Pick { PICK_NONE = 0, PICK_WB, PICK_MASK_COLOR, PICK_MASK_LUMA, PICK_FX_COLOR, PICK_FX_LUMA };
+enum Pick { PICK_NONE = 0, PICK_WB, PICK_MASK_COLOR, PICK_MASK_LUMA, PICK_FX_COLOR, PICK_FX_LUMA, PICK_MASK_DEPTH, PICK_FOCUS, PICK_FX_DEPTH };
 enum BottomTab { TAB_LIBRARY = 0, TAB_CLASSIC, TAB_EXPERIMENTS };
 enum AltView { ALT_NONE = 0, ALT_HIGHLIGHTS, ALT_SHADOWS };
 
 struct SettingsClip { Params p; uint32_t groups = 0; bool valid = false; };
+
+// Result of a background depth estimation.
+struct DepthResult { std::wstring path; std::vector<float> d; int w = 0, h = 0; bool ok = false; std::string error, device; };
+enum DepthState { DEPTH_NONE = 0, DEPTH_BUSY, DEPTH_READY, DEPTH_FAILED };
+enum ExpSub { EXP_EFFECTS = 0, EXP_OPTICS };
 
 struct App {
     HWND hwnd = nullptr;
@@ -131,6 +136,16 @@ struct App {
 
     // panel state
     int curveCh = 0, hslTab = 0, gradeTab = 0;
+
+    // experiments: effects or optics, depth map
+    int expSub = EXP_EFFECTS;
+    int selOptic = -1;
+    int depthState = DEPTH_NONE;
+    std::string depthInfo;
+    bool depthFromCache = false;
+    std::future<std::shared_ptr<DepthResult>> depthJob;
+    bool depthPaint = false, depthFar = false;
+    float depthBrush = 0.06f, depthStrength = 0.25f;
 
     // export
     bool exportOpen = false;

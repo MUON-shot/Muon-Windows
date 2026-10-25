@@ -294,6 +294,30 @@ static void MakeSmall(LoadedImage& img) {
             for (int c = 0; c < 3; c++) img.preview[((size_t)y * img.sw + x) * 3 + c] = (float)(acc[c] / n);
         }
     }
+    // sRGB copy for the depth network (it was trained on ordinary photos, not linear RAW data)
+    {
+        float ds = std::min(1.0f, 770.0f / lw);
+        img.dw = std::max(1, (int)(img.w * ds)); img.dh = std::max(1, (int)(img.h * ds));
+        img.depthSrc.assign((size_t)img.dw * img.dh * 4, 255);
+        for (int y = 0; y < img.dh; y++) {
+            for (int x = 0; x < img.dw; x++) {
+                int x0 = x * img.w / img.dw, x1 = std::max(x0 + 1, (x + 1) * img.w / img.dw);
+                int y0 = y * img.h / img.dh, y1 = std::max(y0 + 1, (y + 1) * img.h / img.dh);
+                double acc[3] = {}; int n = 0;
+                int stepx = std::max(1, (x1 - x0) / 3), stepy = std::max(1, (y1 - y0) / 3);
+                for (int yy = y0; yy < y1; yy += stepy) for (int xx = x0; xx < x1; xx += stepx) {
+                    size_t idx = ((size_t)yy * img.w + xx) * 4;
+                    for (int c = 0; c < 3; c++) acc[c] += img.isRaw ? img.rgba16[idx + c] / 65535.0 * 1.41 : img.rgba8[idx + c] / 255.0;
+                    n++;
+                }
+                for (int c = 0; c < 3; c++) {
+                    float v = (float)(acc[c] / n);
+                    if (img.isRaw) v = v <= 0.0031308f ? 12.92f * v : 1.055f * std::pow(std::min(v, 1.0f), 1.0f / 2.4f) - 0.055f;
+                    img.depthSrc[((size_t)y * img.dw + x) * 4 + c] = (uint8_t)std::clamp((int)(v * 255 + 0.5f), 0, 255);
+                }
+            }
+        }
+    }
 }
 
 static bool LoadRaw(const std::wstring& path, LoadedImage& out) {

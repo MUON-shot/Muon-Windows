@@ -4,6 +4,7 @@
 #include "effects.h"
 #include "imageio.h"
 #include "preset.h"
+#include "depth.h"
 #include <chrono>
 #include <cstdio>
 #include <algorithm>
@@ -66,6 +67,85 @@ int RunSelfTest(const std::wstring& in, const std::wstring& dir) {
         Effect e = MakeEffect(FX_ASCII); e.target = TG_LUMA; e.tLo = 0; e.tHi = 0.4f; p.effects.push_back(e);
         Effect n = MakeEffect(FX_NEON); n.target = TG_COLOR; n.tHue = 210; p.effects.push_back(n);
         Out(dir, "fx_combo_targets", p);
+    }
+    // depth map, light and glass
+    {
+        std::vector<float> d; int dw = 0, dh = 0; std::string err, device;
+        auto a = std::chrono::high_resolution_clock::now();
+        bool ok = DepthModuleAvailable() && DepthEstimate(img.depthSrc, img.dw, img.dh, d, dw, dh, err, &device);
+        auto b = std::chrono::high_resolution_clock::now();
+        if (ok) {
+            // second run shows the steady cost without session creation
+            a = std::chrono::high_resolution_clock::now();
+            DepthEstimate(img.depthSrc, img.dw, img.dh, d, dw, dh, err);
+            b = std::chrono::high_resolution_clock::now();
+            g_pipe.setDepth(d, dw, dh);
+        }
+        char buf[200];
+        snprintf(buf, sizeof(buf), "depth: %s %dx%d on %s, %.0f ms%s%s", ok ? "ok" : "not available", dw, dh, device.c_str(),
+                 std::chrono::duration<double, std::milli>(b - a).count(), err.empty() ? "" : "  ", err.c_str());
+        LogLine(buf);
+        { Params p; p.showDepth = true; Out(dir, "op_depth_view", p); }
+        { Params p; p.fogAmount = 70; p.fogStart = 30; Out(dir, "op_fog", p); }
+        { Params p; p.dofAmount = 80; p.dofFocus = 80; p.dofRange = 10; Out(dir, "op_dof", p); }
+        { Params p; Effect e = MakeEffect(FX_ASCII); e.target = TG_DEPTH; e.tLo = 0; e.tHi = 0.35f; p.effects.push_back(e); Out(dir, "op_fx_depth", p); }
+        { Params p; Mask m = MakeMask(MS_FULL, MR_DEPTH); m.lumLo = 0.6f; m.lumHi = 1; m.adj.exposure = 1.5f; p.masks.push_back(m); Out(dir, "op_depth_mask", p); }
+        {
+            Params p;
+            OpticObj l = MakeOptic(OP_LIGHT); l.x = 0.3f; l.y = 0.35f; l.rays = 60; p.optics.push_back(l);
+            OpticObj s = MakeOptic(OP_SPOT); s.x = 0.75f; s.y = 0.2f; s.dir = 120; s.color[0] = 0.5f; s.color[1] = 0.7f; s.color[2] = 1; p.optics.push_back(s);
+            Out(dir, "op_lights", p);
+            p.microRelief = 0; Out(dir, "op_lights_nomicro", p);
+            p.relief = 0; Out(dir, "op_lights_flat", p);
+        }
+        { Params p; OpticObj l = MakeOptic(OP_LIGHT); l.x = 0.85f; l.y = 0.05f; l.height = 20; l.ambient = 40; p.optics.push_back(l); Out(dir, "op_shadow_far", p);
+          p.optics[0].height = 70; Out(dir, "op_shadow_high", p); }
+        { Params p; OpticObj s = MakeOptic(OP_SPOT); s.x = 0.7f; s.y = 0.15f; s.dir = 120; s.ambient = 60; p.optics.push_back(s); Out(dir, "op_spot", p); }
+        {
+            Params p;
+            OpticObj pr = MakeOptic(OP_PRISM); pr.x = 0.5f; pr.y = 0.5f; pr.angle = 90; p.optics.push_back(pr);
+            OpticObj bm = MakeOptic(OP_BEAM); bm.x = 0.1f; bm.y = 0.5f; bm.dir = 0; p.optics.push_back(bm);
+            Out(dir, "op_prism_beam", p);
+        }
+        const int kinds[] = { OP_PRISM, OP_LENS, OP_SPHERE, OP_GLASS, OP_DROPS };
+        for (int k : kinds) {
+            int variants = k == OP_LENS ? 3 : k == OP_GLASS ? 4 : 1;
+            for (int v = 0; v < variants; v++) {
+                Params p;
+                OpticObj l = MakeOptic(OP_LIGHT); l.x = 0.2f; l.y = 0.2f; p.optics.push_back(l);
+                OpticObj o = MakeOptic(k); o.variant = v; p.optics.push_back(o);
+                char name[64]; snprintf(name, sizeof(name), "op_glass_%d_%d", k, v);
+                Out(dir, name, p);
+            }
+        }
+        {
+            Params p; p.relief = 70; p.fogAmount = 20;
+            p.optics.push_back(MakeOptic(OP_SPHERE)); p.optics.push_back(MakeOptic(OP_SPOT));
+            p.depthDabs.push_back(Dab{ 0.5f, 0.5f, 0.1f, 0.5f, 0.4f, 0 });
+            std::string s = SerializeParams(p, true, true);
+            Params q;
+            bool rt = DeserializeParams(s, q, true, true) && SerializeParams(q, true, true) == s && q.optics.size() == 2 && q.depthDabs.size() == 1;
+            Preset pr; pr.name = "optics"; pr.groups = SG_OPTICS; pr.params = p;
+            Preset back;
+            bool pc = PresetFromCode(PresetToCode(pr), back) && back.params.optics.size() == 2;
+            LogLine(std::string("optics serialize ") + (rt ? "ok" : "FAIL") + ", preset " + (pc ? "ok" : "FAIL"));
+            RenderOpts o;
+            a = std::chrono::high_resolution_clock::now();
+            for (int i = 0; i < 10; i++) g_pipe.renderDisplay(p, 1600, o);
+            b = std::chrono::high_resolution_clock::now();
+            snprintf(buf, sizeof(buf), "optics preview 1600px avg %.1f ms", std::chrono::duration<double, std::milli>(b - a).count() / 10);
+            LogLine(buf);
+            // heaviest case at full resolution: several lights with shafts and glass (must stay far below the 2 s GPU watchdog)
+            Params h = p;
+            for (int i = 0; i < 4; i++) { OpticObj l = MakeOptic(i % 2 ? OP_SPOT : OP_LIGHT); l.x = 0.2f + i * 0.2f; l.rays = 60; h.optics.push_back(l); }
+            h.optics.push_back(MakeOptic(OP_GLASS)); h.optics.push_back(MakeOptic(OP_PRISM)); h.dofAmount = 60;
+            std::vector<uint16_t> px; int w = 0, hh = 0;
+            a = std::chrono::high_resolution_clock::now();
+            bool ok2 = g_pipe.renderExport(h, 0, 0, 0, px, w, hh);
+            b = std::chrono::high_resolution_clock::now();
+            snprintf(buf, sizeof(buf), "optics full-res export %dx%d %s %.0f ms", w, hh, ok2 ? "ok" : "FAIL", std::chrono::duration<double, std::milli>(b - a).count());
+            LogLine(buf);
+        }
     }
     // round trip serialization
     {

@@ -14,6 +14,12 @@ Copy-Item "$root\LICENSE" "$stage\LICENSE.txt"
 Copy-Item "$root\THIRD_PARTY_NOTICES.md" $stage
 Copy-Item "$root\licenses\*" "$stage\licenses"
 Copy-Item "$root\docs\README-release.txt" "$stage\README.txt"
+if (Test-Path "$root\depth\onnxruntime.dll") {
+    New-Item -ItemType Directory -Force "$stage\depth" | Out-Null
+    Copy-Item "$root\depth\*" "$stage\depth"
+} else {
+    Write-Warning "depth folder missing (run tools\fetch_depth.ps1): the zip will have no depth module"
+}
 
 $zip = "$root\dist\Muon-$ver-win64.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue

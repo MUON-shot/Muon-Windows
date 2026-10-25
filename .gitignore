@@ -13,3 +13,5 @@
 /presets/
 /samples/
 *.muon
+/models_dl/
+/depth/

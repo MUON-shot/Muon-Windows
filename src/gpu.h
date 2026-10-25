@@ -41,6 +41,7 @@ struct Gpu {
     ID3D11Buffer* cbCommon = nullptr;
     ID3D11Buffer* cbPass = nullptr;     // 16 KB dynamic
     ID3D11BlendState* blendAlpha = nullptr;
+    ID3D11BlendState* blendAdd = nullptr;
     ID3D11RasterizerState* raster = nullptr;
 
     CommonCB common{};

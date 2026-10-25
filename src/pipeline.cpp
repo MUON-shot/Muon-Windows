@@ -284,6 +284,9 @@ float4 main(VSO i) : SV_Target {
         float3 h = rgb2hsv(img);
         float d = abs(frac(h.x - hueC / 360 + 0.5) - 0.5) * 360;
         w *= (1 - smoothstep(hueW * 0.5, hueW * 0.5 + hueF + 1e-3, d)) * smoothstep(satMin * 0.5, satMin + 1e-3, h.y);
+    } else if (rg == 3) {
+        float N = t2.SampleLevel(sLin, i.uv, 0).r; float f = max(lumF, 1e-3);
+        w *= smoothstep(lumLo - f, lumLo, N) * (1 - smoothstep(lumHi, lumHi + f, N));
     }
     return float4(w, 0, 0, 1);
 }
@@ -503,6 +506,7 @@ bool Pipeline::init() {
     for (auto& f : fut) f.get();
     for (auto& j : jobs) if (!*j.out) return false;
 
+    if (!initOptics()) return false;
     lut = g_gpu.create(256, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, false);
     histSmall = nullptr;
     return lut != nullptr;
@@ -520,12 +524,13 @@ void Pipeline::shutdown() {
     brushes.clear();
     for (auto& g : glyphs) if (g.second.first) { g.second.first->release(); delete g.second.first; }
     glyphs.clear();
+    shutdownOptics();
 }
 
 void Pipeline::releaseKeep() {
     for (Tex*& t : keep) g_gpu.release(t);
     keep.clear();
-    lastGeo = lastDev = nullptr;
+    lastGeo = lastDev = lastDepth = nullptr;
     lastMaskW.clear();
 }
 
@@ -534,6 +539,7 @@ void Pipeline::setSource(const LoadedImage& img) {
     if (src) { src->release(); delete src; src = nullptr; }
     for (auto& b : brushes) if (b.second.tex) { b.second.tex->release(); delete b.second.tex; }
     brushes.clear();
+    clearDepth();
     g_gpu.trimPool();
     srcIsRaw = img.isRaw;
     srcW = img.w; srcH = img.h;
@@ -599,6 +605,42 @@ void Pipeline::updateLut(const Params& p, bool& identity) {
     g_gpu.ctx->UpdateSubresource(lut->tex, 0, nullptr, data.data(), 256 * 16, 0);
 }
 
+void Pipeline::drawDabs(Tex* target, const std::vector<Dab>& dabs, size_t from, float aspect, ID3D11PixelShader* ps, ID3D11BlendState* blend) {
+    auto* ctx = g_gpu.ctx;
+    g_gpu.unbindAll();
+    D3D11_VIEWPORT vp = { 0, 0, (float)target->w, (float)target->h, 0, 1 };
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(g_gpu.raster);
+    ctx->OMSetRenderTargets(1, &target->rtv, nullptr);
+    float bf[4] = {};
+    ctx->OMSetBlendState(blend, bf, 0xffffffff);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_gpu.vsDab, nullptr, 0);
+    ctx->PSSetShader(ps, nullptr, 0);
+    ID3D11Buffer* cbs[2] = { g_gpu.cbCommon, g_gpu.cbPass };
+    ctx->VSSetConstantBuffers(0, 2, cbs);
+    ctx->PSSetConstantBuffers(0, 2, cbs);
+    struct DabCB { float a[512][4]; float b[512][4]; float info[4]; };
+    static DabCB cb;
+    size_t i = from;
+    while (i < dabs.size()) {
+        size_t n = std::min<size_t>(512, dabs.size() - i);
+        for (size_t k = 0; k < n; k++) {
+            const Dab& d = dabs[i + k];
+            cb.a[k][0] = d.x; cb.a[k][1] = d.y; cb.a[k][2] = d.r; cb.a[k][3] = d.flow;
+            cb.b[k][0] = d.feather; cb.b[k][1] = d.erase; cb.b[k][2] = 0; cb.b[k][3] = 0;
+        }
+        cb.info[0] = aspect;
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (SUCCEEDED(ctx->Map(g_gpu.cbPass, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { memcpy(map.pData, &cb, sizeof(cb)); ctx->Unmap(g_gpu.cbPass, 0); }
+        ctx->DrawInstanced(6, (UINT)n, 0, 0);
+        i += n;
+    }
+    ctx->OMSetBlendState(nullptr, bf, 0xffffffff);
+    g_gpu.unbindAll();
+}
+
 Tex* Pipeline::brushTexture(const Mask& m, const Geo& g) {
     int lw = 2048;
     int bw, bh;
@@ -612,43 +654,8 @@ Tex* Pipeline::brushTexture(const Mask& m, const Geo& g) {
         bc.w = bw; bc.h = bh; bc.rev = m.brushRev; bc.count = 0;
         g_gpu.clear(bc.tex, 0, 0, 0, 0);
     }
-    if (m.dabs.size() > bc.count) {
-        auto* ctx = g_gpu.ctx;
-        g_gpu.unbindAll();
-        D3D11_VIEWPORT vp = { 0, 0, (float)bw, (float)bh, 0, 1 };
-        ctx->RSSetViewports(1, &vp);
-        ctx->RSSetState(g_gpu.raster);
-        ctx->OMSetRenderTargets(1, &bc.tex->rtv, nullptr);
-        float bf[4] = {};
-        ctx->OMSetBlendState(g_gpu.blendAlpha, bf, 0xffffffff);
-        ctx->IASetInputLayout(nullptr);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx->VSSetShader(g_gpu.vsDab, nullptr, 0);
-        ctx->PSSetShader(psDab, nullptr, 0);
-        ID3D11Buffer* cbs[2] = { g_gpu.cbCommon, g_gpu.cbPass };
-        ctx->VSSetConstantBuffers(0, 2, cbs);
-        ctx->PSSetConstantBuffers(0, 2, cbs);
-        struct DabCB { float a[512][4]; float b[512][4]; float info[4]; };
-        static DabCB cb;
-        float aspect = (float)g.canvasW / g.canvasH;
-        size_t i = bc.count;
-        while (i < m.dabs.size()) {
-            size_t n = std::min<size_t>(512, m.dabs.size() - i);
-            for (size_t k = 0; k < n; k++) {
-                const Dab& d = m.dabs[i + k];
-                cb.a[k][0] = d.x; cb.a[k][1] = d.y; cb.a[k][2] = d.r; cb.a[k][3] = d.flow;
-                cb.b[k][0] = d.feather; cb.b[k][1] = d.erase; cb.b[k][2] = 0; cb.b[k][3] = 0;
-            }
-            cb.info[0] = aspect;
-            D3D11_MAPPED_SUBRESOURCE map;
-            if (SUCCEEDED(ctx->Map(g_gpu.cbPass, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { memcpy(map.pData, &cb, sizeof(cb)); ctx->Unmap(g_gpu.cbPass, 0); }
-            ctx->DrawInstanced(6, (UINT)n, 0, 0);
-            i += n;
-        }
-        bc.count = m.dabs.size();
-        ctx->OMSetBlendState(nullptr, bf, 0xffffffff);
-        g_gpu.unbindAll();
-    }
+    if (m.dabs.size() > bc.count) drawDabs(bc.tex, m.dabs, bc.count, (float)g.canvasW / g.canvasH, psDab, g_gpu.blendAlpha);
+    bc.count = m.dabs.size();
     return bc.tex;
 }
 
@@ -747,7 +754,7 @@ Tex* Pipeline::applyEffect(const Effect& e, Tex* in, int W, int H, const std::ve
     c.lo = e.tLo; c.hi = e.tHi; c.feather = e.tFeather; c.hueC = e.tHue; c.hueW = e.tHueWidth; c.hueF = e.tHueFeather; c.satMin = e.tSatMin;
     Tex* mw = (e.target == TG_MASK && e.tMask >= 0 && e.tMask < (int)maskW.size()) ? maskW[e.tMask] : nullptr;
     Tex* out = g_gpu.acquire(W, H, F);
-    g_gpu.pass(psCombine, out, { in->srv, fx->srv, mw ? mw->srv : nullptr }, &c, sizeof(c));
+    g_gpu.pass(psCombine, out, { in->srv, fx->srv, mw ? mw->srv : nullptr, e.target == TG_DEPTH && lastDepth ? lastDepth->srv : nullptr }, &c, sizeof(c));
     g_gpu.release(fx);
     return out;
 }
@@ -854,6 +861,18 @@ Tex* Pipeline::renderCore(const Params& p, const Geo& g, int W, int H, const Ren
     g_gpu.release(lum);
     kept.push_back(dev); lastDev = dev;
 
+    // ---- depth map aligned with the output (same geometry, without lens colour effects)
+    Tex* depth = nullptr;
+    if (needsDepth(p)) {
+        GeoCB dg = gc;
+        dg.ca = 0; dg.lvig = 0;
+        Tex* al = g_gpu.acquire(W, H, DXGI_FORMAT_R16_FLOAT);
+        g_gpu.pass(psGeo, al, { (depthTex ? depthTex : flatDepth)->srv }, &dg, sizeof(dg));
+        depth = refineDepth(p, g, al, dev, W, H);
+        g_gpu.release(al);
+        kept.push_back(depth); lastDepth = depth;
+    }
+
     // ---- masks
     Tex* cur = dev;
     std::vector<Tex*> maskW(p.masks.size(), nullptr);
@@ -881,7 +900,7 @@ Tex* Pipeline::renderCore(const Params& p, const Geo& g, int W, int H, const Ren
             mc.asp = (float)g.canvasW / g.canvasH;
             Tex* bt = m.shape == MS_BRUSH ? brushTexture(m, g) : nullptr;
             Tex* w = g_gpu.acquire(W, H, DXGI_FORMAT_R16_FLOAT);
-            g_gpu.pass(psMaskW, w, { dev->srv, bt ? bt->srv : nullptr }, &mc, sizeof(mc));
+            g_gpu.pass(psMaskW, w, { dev->srv, bt ? bt->srv : nullptr, depth ? depth->srv : nullptr }, &mc, sizeof(mc));
             maskW[k] = w;
             kept.push_back(w);
             LocalCB l = {};
@@ -921,6 +940,14 @@ Tex* Pipeline::renderCore(const Params& p, const Geo& g, int W, int H, const Ren
         g_gpu.pass(psFinish, nx, { cur->srv }, &f, sizeof(f));
         if (cur != dev) g_gpu.release(cur);
         cur = nx;
+    }
+
+    // ---- depth, light and glass
+    if (depth && opticsActive(p)) {
+        Tex* nx;
+        if (p.showDepth) { nx = g_gpu.acquire(W, H, F); g_gpu.pass(psDepthView, nx, { cur->srv, depth->srv }); }
+        else nx = applyOptics(p, g, cur, depth, W, H);
+        if (nx != cur) { if (cur != dev) g_gpu.release(cur); cur = nx; }
     }
 
     // ---- experimental stack
@@ -1048,3 +1075,9 @@ static bool SampleTex(Tex* t, float u, float v, float rgb[3]) {
 }
 bool Pipeline::sampleSource(float u, float v, float rgb[3]) { return SampleTex(lastGeo, u, v, rgb); }
 bool Pipeline::sampleDeveloped(float u, float v, float rgb[3]) { return SampleTex(lastDev, u, v, rgb); }
+bool Pipeline::sampleDepth(float u, float v, float& n) {
+    float rgb[3];
+    if (!SampleTex(lastDepth, u, v, rgb)) return false;
+    n = rgb[0];
+    return true;
+}

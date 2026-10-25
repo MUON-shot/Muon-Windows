@@ -21,6 +21,7 @@ const char* GroupName(int bit) {
     case SG_EFFECTS: return T("Эксперименты", "Experiments");
     case SG_CROP: return T("Кадрирование и поворот", "Crop & rotation");
     case SG_MASKS: return T("Маски", "Masks");
+    case SG_OPTICS: return T("Оптика, свет и глубина", "Optics, light and depth");
     }
     return "";
 }
@@ -51,6 +52,13 @@ void CopyGroups(Params& d, const Params& s, uint32_t g) {
         d.straighten = s.straighten; d.perspV = s.perspV; d.perspH = s.perspH; d.geoScale = s.geoScale;
     }
     if (g & SG_MASKS) { d.masks = s.masks; for (auto& m : d.masks) { m.id = NewId(); m.brushRev = NewRev(); } }
+    if (g & SG_OPTICS) {
+        d.optics = s.optics; for (auto& o : d.optics) o.id = NewId();
+        // hand corrections of the depth map belong to one photo and are not copied
+        d.relief = s.relief; d.microRelief = s.microRelief; d.fogAmount = s.fogAmount; d.fogStart = s.fogStart;
+        for (int i = 0; i < 3; i++) d.fogColor[i] = s.fogColor[i];
+        d.dofAmount = s.dofAmount; d.dofFocus = s.dofFocus; d.dofRange = s.dofRange;
+    }
 }
 
 // ------------------------------------------------------------------ text format
@@ -76,7 +84,7 @@ static uint32_t Crc32(const std::string& s) {
 }
 
 std::string PresetToText(const Preset& p) {
-    bool geo = (p.groups & SG_CROP) != 0, masks = (p.groups & SG_MASKS) != 0;
+    bool geo = (p.groups & SG_CROP) != 0, masks = (p.groups & (SG_MASKS | SG_OPTICS)) != 0;   // optics travel in the same block as masks
     Params tmp;                                      // keep only the groups the preset carries
     CopyGroups(tmp, p.params, p.groups);
     std::string body = SerializeParams(tmp, geo, masks, true);

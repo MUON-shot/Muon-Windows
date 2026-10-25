@@ -1,6 +1,7 @@
 #include "app.h"
 #include "gpu.h"
 #include "pipeline.h"
+#include "depth.h"
 #include "widgets.h"
 #include "i18n.h"
 #include "imgui.h"
@@ -282,6 +283,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         LogLine("gpu: " + (g_gpuUsed >= 0 ? WideToUtf8(g_gpuNames[g_gpuUsed]) : std::string("software (WARP)")));
         if (g_gpu.init(g_dev, g_ctx) && g_pipe.init()) rc = RunSelfTest(argv[2], argv[3]);
         else LogLine("init failed");
+        DepthShutdown();
         g_pipe.shutdown(); g_gpu.shutdown();
         return rc;
     }
@@ -366,6 +368,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (uitest) {
             if (!g_app.loading && g_pipe.hasSource()) {
                 if (!uiSetup) { UiTestSetup(uiScenario); uiSetup = true; }
+                if (g_app.depthState == DEPTH_BUSY) uiFrames = 2;   // wait for the depth map
                 if (++uiFrames == 12) { SaveBackbuffer(uiOut); done = true; }
             }
             idleFrames = 0;

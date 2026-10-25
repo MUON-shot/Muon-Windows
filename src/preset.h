@@ -20,9 +20,10 @@ enum SettingsGroup : uint32_t {
     SG_EFFECTS  = 1u << 11,  // experimental stack
     SG_CROP     = 1u << 12,  // crop, rotation, perspective
     SG_MASKS    = 1u << 13,
-    SG_COUNT    = 14,
+    SG_OPTICS   = 1u << 14,  // glass, lights, depth corrections, fog, depth of field
+    SG_COUNT    = 15,
     SG_DEVELOP  = (1u << 12) - 1,       // everything except crop and masks
-    SG_ALL      = (1u << 14) - 1,
+    SG_ALL      = (1u << 15) - 1,
     SG_LOOK     = SG_TONE | SG_PRESENCE | SG_CURVE | SG_HSL | SG_GRADE | SG_BW | SG_VIGGRAIN,
 };
 

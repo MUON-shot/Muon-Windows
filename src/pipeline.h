@@ -40,6 +40,14 @@ public:
     bool sampleSource(float u, float v, float rgb[3]);
     // Developed (display) color around output uv.
     bool sampleDeveloped(float u, float v, float rgb[3]);
+    // Nearness (0..1) of the aligned depth map around output uv; false when no depth was used in the last render.
+    bool sampleDepth(float u, float v, float& n);
+
+    // Depth map in source orientation (nearness 0..1). Without it a flat stand-in is used.
+    void setDepth(const std::vector<float>& d, int w, int h);
+    void clearDepth();
+    bool hasDepth() const { return depthTex != nullptr; }
+    bool needsDepth(const Params& p) const;
 
     Tex* display = nullptr;
     int dispW = 0, dispH = 0;
@@ -56,6 +64,13 @@ private:
     void updateLut(const Params& p, bool& identity);
     void computeHistogram(Tex* t);
     void releaseKeep();
+    void drawDabs(Tex* target, const std::vector<Dab>& dabs, size_t from, float aspect, ID3D11PixelShader* ps, ID3D11BlendState* blend);
+    bool initOptics();
+    void shutdownOptics();
+    bool opticsActive(const Params& p) const;
+    Tex* depthEditTexture(const Params& p, const Geo& g);
+    Tex* refineDepth(const Params& p, const Geo& g, Tex* aligned, Tex* guide, int W, int H);
+    Tex* applyOptics(const Params& p, const Geo& g, Tex* cur, Tex* depth, int W, int H);
 
     Tex* src = nullptr;
     bool srcIsRaw = false;
@@ -66,10 +81,17 @@ private:
                       *psDevelop = nullptr, *psMaskW = nullptr, *psLocal = nullptr, *psSharpen = nullptr, *psFinish = nullptr,
                       *psOutput = nullptr, *psDab = nullptr, *psCombine = nullptr, *psConvert = nullptr, *psDispLum = nullptr;
     ID3D11PixelShader* psFx[FX_COUNT] = {};
+    ID3D11PixelShader *psDepthRefine = nullptr, *psDabAdd = nullptr, *psDepthView = nullptr, *psFogDof = nullptr,
+                      *psDepthMax = nullptr, *psLightsLow = nullptr, *psLightsFull = nullptr, *psGlass = nullptr;
 
     struct BrushCache { Tex* tex = nullptr; uint32_t rev = 0; size_t count = 0; int w = 0, h = 0; };
     std::map<uint32_t, BrushCache> brushes;
     std::map<std::string, std::pair<Tex*, int>> glyphs;
+    BrushCache depthEdit;
+    Tex* depthTex = nullptr;
+    Tex* flatDepth = nullptr;
+    int depthW_ = 0, depthH_ = 0;
+    Tex* lastDepth = nullptr;
 
     std::vector<Tex*> keep;   // textures alive until the next render (geo/dev/masks for picking & overlays)
     Tex* lastGeo = nullptr;
